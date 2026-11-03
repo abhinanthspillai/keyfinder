@@ -1,0 +1,199 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Key Finder — Device Dashboard</title>
+  <link rel="icon" type="image/svg+xml" href="/static/favicon.svg">
+  <link rel="apple-touch-icon" href="/static/favicon.svg">
+  <link rel="stylesheet" href="/static/style.css">
+  <!-- Chart.js CDN -->
+  <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.1/dist/chart.umd.min.js"></script>
+</head>
+<body>
+  <div class="app-container">
+    <!-- Top Bar -->
+    <header class="top-bar">
+      <div class="brand">
+        <h1 class="brand-title">Key Finder</h1>
+      </div>
+      <div class="update-indicator" aria-live="polite">
+        <span id="update-timer" class="muted-text">Connecting...</span>
+      </div>
+    </header>
+
+    <!-- Main Content -->
+    <main class="dashboard-grid">
+      <!-- Status Row: 3 Equal Cards -->
+      <section class="status-row" aria-label="Device Status Overview">
+        <!-- Status Card -->
+        <div class="card status-card" id="device-status-card">
+          <div class="card-label">Device status</div>
+          <div class="status-value-wrapper">
+            <span class="status-dot" id="status-dot" aria-hidden="true"></span>
+            <span class="status-text big-value" id="status-text">Checking...</span>
+          </div>
+          <div class="muted-text sub-label" id="last-seen-text">Waiting for device heartbeat</div>
+        </div>
+
+        <!-- Wi-Fi Signal Card -->
+        <div class="card" id="wifi-card">
+          <div class="card-label">Wi-Fi signal</div>
+          <div class="wifi-value-wrapper">
+            <span class="big-value" id="wifi-rssi">--</span>
+            <span class="unit-text" id="wifi-unit">dBm</span>
+          </div>
+          <div class="muted-text sub-label" id="wifi-quality">Signal quality</div>
+        </div>
+
+        <!-- Rings Today Card -->
+        <div class="card" id="rings-card">
+          <div class="card-label">Rings today</div>
+          <div class="big-value" id="rings-count">--</div>
+          <div class="muted-text sub-label">Triggered by Telegram, shortcut, or web</div>
+        </div>
+      </section>
+
+      <!-- Primary Action Card -->
+      <section class="action-section" aria-label="Device Controls">
+        <div class="card action-card">
+          <div class="action-buttons-row">
+            <button id="ring-btn" class="primary-btn" type="button" aria-live="polite">
+              Ring my keys
+            </button>
+            <button id="voice-btn" class="voice-btn" type="button" aria-label="Voice command" title="Click to speak (Say 'Keys', 'Ring keys', or 'Ring')">
+              <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                <path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"></path>
+                <path d="M19 10v2a7 7 0 0 1-14 0v-2"></path>
+                <line x1="12" y1="19" x2="12" y2="23"></line>
+                <line x1="8" y1="23" x2="16" y2="23"></line>
+              </svg>
+            </button>
+          </div>
+          <div id="action-message" class="action-feedback" aria-live="polite"></div>
+        </div>
+      </section>
+
+      <!-- Mobile Shortcuts & Telegram Section -->
+      <section class="shortcuts-row" aria-label="Mobile Shortcuts & Telegram Bot">
+        <!-- Telegram Bot Focus Card -->
+        <div class="card telegram-focus-card">
+          <div class="card-header-clean">
+            <div class="card-label">📱 Telegram Bot Controller</div>
+            <span class="badge-pill active-pill">Active</span>
+          </div>
+          <p class="card-desc">Zero typing required. Control your keys with persistent 1-tap buttons directly inside Telegram.</p>
+          <div class="telegram-actions">
+            <a href="https://t.me/My_keyfinder_bot" target="_blank" rel="noopener noreferrer" class="tg-open-btn">
+              <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
+                <path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10S17.52 2 12 2zm4.64 6.8c-.15 1.58-.8 5.42-1.13 7.19-.14.75-.42 1-.68 1.03-.58.05-1.02-.38-1.58-.75-.88-.58-1.38-.94-2.23-1.5-.99-.65-.35-1.01.22-1.59.15-.15 2.71-2.48 2.76-2.69a.2.2 0 00-.05-.18c-.06-.05-.14-.03-.21-.02-.09.02-1.49.95-4.22 2.79-.4.27-.76.41-1.08.4-.36-.01-1.04-.2-1.55-.37-.63-.2-1.12-.31-1.08-.66.02-.18.27-.36.75-.55 2.92-1.27 4.86-2.11 5.83-2.52 2.78-1.16 3.35-1.36 3.73-1.36.08 0 .27.02.39.12.1.08.13.19.14.27-.01.06.01.24 0 .37z"/>
+              </svg>
+              Open @My_keyfinder_bot
+            </a>
+          </div>
+          <div class="feature-bullets">
+            <div class="bullet-item">🔘 <b>1-Tap Keypad:</b> Ring, Stop, Status & Last Seen</div>
+            <div class="bullet-item">📲 <b>Find Phone:</b> Press button on ESP32 to ring your phone via bot</div>
+          </div>
+        </div>
+
+        <!-- Mobile Shortcut & Widget Card -->
+        <div class="card mobile-focus-card">
+          <div class="card-header-clean">
+            <div class="card-label">📲 Mobile Home-Screen Widget</div>
+            <span class="badge-pill">1-Tap Ring</span>
+          </div>
+          <p class="card-desc">Open on your phone to add a 1-tap ring button to your home screen or lock screen.</p>
+          <div class="mobile-widget-flex">
+            <div class="qr-col">
+              <img id="shortcut-qr-img" class="qr-img" src="" alt="Scan QR code for Mobile Shortcut" />
+              <div class="qr-label">Scan with phone camera</div>
+            </div>
+            <div class="shortcut-details-col">
+              <div class="shortcut-box">
+                <input type="text" id="shortcut-url-input" class="shortcut-url-input" readonly value="Loading shortcut..." />
+                <button type="button" id="copy-shortcut-btn" class="copy-btn">Copy Link</button>
+                <a id="open-shortcut-btn" href="/quick?token=keyfinder_quick_token_2024" target="_blank" class="test-btn">Open</a>
+              </div>
+              <div class="mobile-tips">
+                <div class="tip-line">🍏 <b>iPhone:</b> Open in Safari &rarr; Tap <i>Share</i> &rarr; <b>Add to Home Screen</b></div>
+                <div class="tip-line">🤖 <b>Android:</b> Open in Chrome &rarr; Tap <i>⋮ Menu</i> &rarr; <b>Add to Home screen</b></div>
+              </div>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <!-- Charts Row: 2 Cards Side by Side -->
+      <section class="charts-row" aria-label="Historical Metrics">
+        <!-- Wi-Fi Signal Over Time -->
+        <div class="card chart-card">
+          <div class="card-header-clean">
+            <div class="card-label">Wi-Fi signal over time</div>
+            <span class="chart-legend-badge">RSSI (dBm)</span>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="wifiChart" aria-label="Wi-Fi Signal Line Chart"></canvas>
+          </div>
+        </div>
+
+        <!-- Rings Per Hour -->
+        <div class="card chart-card">
+          <div class="card-header-clean">
+            <div class="card-label">Rings per hour</div>
+            <span class="chart-legend-badge">Events</span>
+          </div>
+          <div class="chart-wrapper">
+            <canvas id="ringsChart" aria-label="Rings per Hour Bar Chart"></canvas>
+          </div>
+        </div>
+      </section>
+
+      <!-- Event Log Card -->
+      <section class="events-section" aria-label="Recent Events">
+        <div class="card table-card">
+          <div class="card-header-clean">
+            <div class="card-label">Event log</div>
+            <span class="muted-text event-counter" id="event-counter">0 events</span>
+          </div>
+          
+          <div class="table-container">
+            <table class="events-table">
+              <thead>
+                <tr>
+                  <th scope="col" style="width: 32%;">Time</th>
+                  <th scope="col" style="width: 44%;">Event</th>
+                  <th scope="col" style="width: 24%; text-align: right;">Source</th>
+                </tr>
+              </thead>
+              <tbody id="events-tbody">
+                <!-- Skeleton loader rows initially -->
+                <tr class="skeleton-row"><td colspan="3"><div class="skeleton-bar"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="3"><div class="skeleton-bar"></div></td></tr>
+                <tr class="skeleton-row"><td colspan="3"><div class="skeleton-bar"></div></td></tr>
+              </tbody>
+            </table>
+          </div>
+
+          <!-- Show more link -->
+          <div class="table-footer" id="table-footer" style="display: none;">
+            <button type="button" class="text-link" id="show-more-btn">Show all events</button>
+          </div>
+        </div>
+      </section>
+    </main>
+
+    <!-- Footer Controls -->
+    <footer class="app-footer">
+      <div class="footer-actions">
+        <button type="button" class="text-action-btn" id="demo-data-btn">Load demo data</button>
+        <span class="footer-divider" id="demo-divider" style="display: none;">·</span>
+        <button type="button" class="text-action-btn" id="clear-demo-btn" style="display: none;">Clear demo data</button>
+      </div>
+      <div class="device-pill">Device: <span id="footer-device-id">esp32_keys_01</span></div>
+    </footer>
+  </div>
+
+  <script src="/static/app.js"></script>
+</body>
+</html>

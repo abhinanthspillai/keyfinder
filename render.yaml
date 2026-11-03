@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: key-finder-backend
+    runtime: docker
+    plan: free
+    region: oregon
+    healthCheckPath: /api/status
+    envVars:
+      - key: API_KEY
+        sync: false
+      - key: QUICK_TOKEN
+        sync: false
+      - key: DEVICE_ID
+        value: esp32_keys_01
+      - key: OFFLINE_THRESHOLD_SECONDS
+        value: "30"
+      - key: TELEGRAM_BOT_TOKEN
+        sync: false
+      - key: ALLOWED_CHAT_IDS
+        sync: false
+      - key: HOST
+        value: 0.0.0.0
+      - key: DATABASE_PATH
+        value: /app/data/key_finder.db

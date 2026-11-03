@@ -1,0 +1,558 @@
+/*
+ * =========================================================================
+ * Find-My-Keys Beeper - ESP32 Firmware
+ * =========================================================================
+ * Hardware Setup:
+ *   - Board: ESP32 DevKit V1 (30-pin)
+ *   - Sound Sensor DO (LM393): GPIO33
+ *   - Active Buzzer (via NPN Transistor & 1k resistor): GPIO25
+ * 
+ * Features:
+ *   - Dual-Clap Detection: Non-blocking, debounced, noise-immune (ignores
+ *     single claps and rapid noise bursts of >= 3 sounds).
+ *   - Ring-on-Demand: Triggers on double-clap (even when offline) and on
+ *     Telegram / Dashboard commands via HTTP polling.
+ *   - Reliable Networking: Periodic 3s heartbeats, auto-reconnect, and
+ *     API key authentication via X-API-Key header.
+ *   - Interactive Test Mode: Tune potentiometer in real-time via Serial.
+ * =========================================================================
+ */
+
+#include <WiFi.h>
+#include <HTTPClient.h>
+#include <ArduinoJson.h>
+#include "config.h"
+
+// -------------------------------------------------------------------------
+// Global State & Timing Variables
+// -------------------------------------------------------------------------
+
+// Wi-Fi & Network
+unsigned long lastHeartbeatTime = 0;
+unsigned long lastWifiCheckTime = 0;
+bool wifiWasConnected = false;
+
+// Sound Sensor State Machine
+enum ClapState {
+    CLAP_IDLE,
+    WAITING_FOR_SECOND_CLAP,
+    CHECKING_FOR_NOISE,
+    CLAP_COOLDOWN
+};
+
+ClapState clapState = CLAP_IDLE;
+unsigned long firstClapTime = 0;
+unsigned long secondClapTime = 0;
+unsigned long cooldownStartTime = 0;
+int noiseSoundCount = 0;
+
+// Debouncing for raw sound pulses
+bool lastRawSoundActive = false;
+unsigned long lastSoundActiveTime = 0;
+unsigned long soundPulseStartTime = 0;
+
+// Dynamic test mode toggle
+bool testModeActive = SOUND_TEST_MODE;
+
+// Buzzer State Machine
+enum BuzzerMode {
+    BUZZER_IDLE,
+    BUZZER_RINGING,
+    BUZZER_CONFIRMATION,
+    BUZZER_WIFI_CONNECTED
+};
+
+BuzzerMode currentBuzzerMode = BUZZER_IDLE;
+unsigned long buzzerPatternStartTime = 0;
+unsigned long buzzerDuration = 0;
+unsigned long buzzerStepTimer = 0;
+int buzzerStep = 0;
+bool buzzerPhysicalState = false;
+
+// -------------------------------------------------------------------------
+// Forward Declarations
+// -------------------------------------------------------------------------
+void initHardware();
+void connectWifiNonBlocking();
+void checkWifiStatus();
+void updateSoundSensor();
+void updateBuzzer();
+void sendHeartbeat();
+void sendClapEvent();
+void sendAck();
+void startRinging(unsigned long durationMs = RING_DURATION_MS);
+void stopRinging();
+void playShortBeep();
+void playWifiConnectedBeep();
+void handleSerialCommands();
+
+// -------------------------------------------------------------------------
+// Arduino Setup & Main Loop
+// -------------------------------------------------------------------------
+void setup() {
+    Serial.begin(115200);
+    delay(500); // Short settle time for serial monitor
+
+    Serial.println();
+    Serial.println(F("================================================"));
+    Serial.println(F("   FIND-MY-KEYS BEEPER - ESP32 FIRMWARE"));
+    Serial.println(F("================================================"));
+    Serial.printf("Device ID: %s\n", DEVICE_ID);
+    Serial.printf("Buzzer Pin: GPIO%d | Sound Pin: GPIO%d\n", PIN_BUZZER, PIN_SOUND_DO);
+    Serial.printf("Active Level: %s\n", SOUND_ACTIVE_LEVEL == LOW ? "LOW" : "HIGH");
+    Serial.println(F("Type 't' + Enter in Serial Monitor to toggle Test Mode."));
+    Serial.println(F("================================================"));
+
+    initHardware();
+
+    // Start Wi-Fi connection
+    WiFi.mode(WIFI_STA);
+    WiFi.setAutoReconnect(true);
+    WiFi.begin(WIFI_SSID, WIFI_PASSWORD);
+    Serial.printf("[Wi-Fi] Connecting to SSID: %s ...\n", WIFI_SSID);
+
+    // Initial short confirmation beep at boot
+    playShortBeep();
+}
+
+void loop() {
+    // 1. Process double-clap detection (highest priority, strictly non-blocking)
+    updateSoundSensor();
+
+    // 2. Drive buzzer patterns (non-blocking state machine)
+    updateBuzzer();
+
+    // 3. Monitor Wi-Fi state & handle reconnects
+    checkWifiStatus();
+
+    // 4. Send periodic heartbeat to backend (every 3 seconds)
+    if (WiFi.status() == WL_CONNECTED && (millis() - lastHeartbeatTime >= HEARTBEAT_INTERVAL_MS)) {
+        lastHeartbeatTime = millis();
+        sendHeartbeat();
+    }
+
+    // 5. Handle any incoming Serial commands (for calibration / testing)
+    handleSerialCommands();
+}
+
+// -------------------------------------------------------------------------
+// Hardware Initialization
+// -------------------------------------------------------------------------
+void initHardware() {
+    // Configure buzzer output
+    pinMode(PIN_BUZZER, OUTPUT);
+    digitalWrite(PIN_BUZZER, LOW);
+
+    // Configure sound sensor input
+    // LM393 DO is typically open-collector or push-pull comparator output.
+    // INPUT_PULLUP ensures a stable default state if module is open-collector.
+    pinMode(PIN_SOUND_DO, INPUT_PULLUP);
+}
+
+// -------------------------------------------------------------------------
+// Sound Sensor & Double-Clap Detection (Non-Blocking)
+// -------------------------------------------------------------------------
+void updateSoundSensor() {
+    unsigned long now = millis();
+    int pinReading = digitalRead(PIN_SOUND_DO);
+    bool isSoundActive = (pinReading == SOUND_ACTIVE_LEVEL);
+
+    // Detect rising edge of a debounced sound pulse
+    bool soundTriggered = false;
+
+    if (isSoundActive && !lastRawSoundActive) {
+        // Sound just started
+        soundPulseStartTime = now;
+        if (now - lastSoundActiveTime > CLAP_DEBOUNCE_MS) {
+            soundTriggered = true;
+            lastSoundActiveTime = now;
+
+            if (testModeActive) {
+                Serial.printf("[TEST] Sound pulse detected at %lu ms (Pin: %d)\n", now, pinReading);
+            }
+        }
+    } else if (!isSoundActive && lastRawSoundActive) {
+        // Sound just ended
+        if (testModeActive) {
+            unsigned long pulseDuration = now - soundPulseStartTime;
+            Serial.printf("[TEST] Sound pulse ended. Duration: %lu ms\n", pulseDuration);
+        }
+    }
+    lastRawSoundActive = isSoundActive;
+
+    // Clap State Machine
+    switch (clapState) {
+        case CLAP_IDLE:
+            if (soundTriggered) {
+                // First clap detected!
+                firstClapTime = now;
+                noiseSoundCount = 1;
+                clapState = WAITING_FOR_SECOND_CLAP;
+                if (testModeActive) {
+                    Serial.println(F("[CLAP] Step 1: First clap registered. Waiting for second clap..."));
+                }
+            }
+            break;
+
+        case WAITING_FOR_SECOND_CLAP:
+            // Check for timeout of second clap (single clap ignored)
+            if (now - firstClapTime > CLAP_MAX_GAP_MS) {
+                if (testModeActive) {
+                    Serial.println(F("[CLAP] Ignored: Single clap timed out (> 900ms). Resetting."));
+                }
+                clapState = CLAP_IDLE;
+                break;
+            }
+
+            if (soundTriggered) {
+                unsigned long gap = now - firstClapTime;
+
+                if (gap < CLAP_MIN_GAP_MS) {
+                    // Sound was too fast (e.g. continuous chatter or noise burst)
+                    if (testModeActive) {
+                        Serial.printf("[CLAP] Sound burst too fast (%lu ms < %d ms). Discarding.\n", gap, CLAP_MIN_GAP_MS);
+                    }
+                    noiseSoundCount++;
+                    // Do not advance; treat as noise burst
+                } else {
+                    // Second clap occurred within valid window (150ms - 900ms)
+                    secondClapTime = now;
+                    noiseSoundCount = 2;
+                    clapState = CHECKING_FOR_NOISE;
+                    if (testModeActive) {
+                        Serial.printf("[CLAP] Step 2: Second clap received at %lu ms (gap: %lu ms). Checking noise window...\n", now, gap);
+                    }
+                }
+            }
+            break;
+
+        case CHECKING_FOR_NOISE:
+            // Check if any additional rapid sounds arrive (disqualifies as 3+ sound noise)
+            if (soundTriggered) {
+                noiseSoundCount++;
+                if (noiseSoundCount >= 3) {
+                    if (testModeActive) {
+                        Serial.println(F("[CLAP] Disqualified: 3 or more sounds detected (noise/talking/music)."));
+                    }
+                    // Transition to short cooldown to ignore rest of noise
+                    cooldownStartTime = now;
+                    clapState = CLAP_COOLDOWN;
+                    break;
+                }
+            }
+
+            // If the noise check window has elapsed with NO third sound: VALID DOUBLE CLAP!
+            if (now - secondClapTime > CLAP_NOISE_CHECK_MS) {
+                Serial.println(F(">>> VALID DOUBLE-CLAP DETECTED! TRIGGERING RING <<<"));
+                
+                // 1. Immediately ring the buzzer (works even if offline!)
+                startRinging(RING_DURATION_MS);
+
+                // 2. If connected to Wi-Fi, report event to backend
+                if (WiFi.status() == WL_CONNECTED) {
+                    sendClapEvent();
+                } else {
+                    Serial.println(F("[EVENT] Wi-Fi offline - event not transmitted, but buzzer ringing."));
+                }
+
+                // 3. Enter 3-second cooldown
+                cooldownStartTime = now;
+                clapState = CLAP_COOLDOWN;
+            }
+            break;
+
+        case CLAP_COOLDOWN:
+            // Inhibit all clap triggers during cooldown period (3 seconds)
+            if (now - cooldownStartTime >= CLAP_COOLDOWN_MS) {
+                if (testModeActive) {
+                    Serial.println(F("[CLAP] Cooldown complete. Sensor active again."));
+                }
+                clapState = CLAP_IDLE;
+            }
+            break;
+    }
+}
+
+// -------------------------------------------------------------------------
+// Buzzer Patterns (Non-Blocking State Machine)
+// -------------------------------------------------------------------------
+void setBuzzerHardware(bool on) {
+    buzzerPhysicalState = on;
+    digitalWrite(PIN_BUZZER, on ? HIGH : LOW);
+}
+
+void startRinging(unsigned long durationMs) {
+    currentBuzzerMode = BUZZER_RINGING;
+    buzzerPatternStartTime = millis();
+    buzzerDuration = durationMs;
+    buzzerStepTimer = millis();
+    buzzerStep = 0;
+    setBuzzerHardware(true);
+    Serial.printf("[BUZZER] Ringing started (Duration: %lu ms)\n", durationMs);
+}
+
+void stopRinging() {
+    currentBuzzerMode = BUZZER_IDLE;
+    setBuzzerHardware(false);
+    Serial.println(F("[BUZZER] Ring stopped."));
+}
+
+void playShortBeep() {
+    currentBuzzerMode = BUZZER_CONFIRMATION;
+    buzzerPatternStartTime = millis();
+    buzzerStepTimer = millis();
+    buzzerStep = 0;
+    setBuzzerHardware(true);
+}
+
+void playWifiConnectedBeep() {
+    currentBuzzerMode = BUZZER_WIFI_CONNECTED;
+    buzzerPatternStartTime = millis();
+    buzzerStepTimer = millis();
+    buzzerStep = 0;
+    setBuzzerHardware(true);
+}
+
+void updateBuzzer() {
+    if (currentBuzzerMode == BUZZER_IDLE) {
+        if (buzzerPhysicalState) setBuzzerHardware(false);
+        return;
+    }
+
+    unsigned long now = millis();
+
+    switch (currentBuzzerMode) {
+        case BUZZER_RINGING:
+            // Overall duration check (10 seconds default)
+            if (now - buzzerPatternStartTime >= buzzerDuration) {
+                stopRinging();
+                return;
+            }
+
+            // Cadence: 150ms ON -> 100ms OFF -> 150ms ON -> 400ms OFF (repeating)
+            switch (buzzerStep) {
+                case 0: // First beep (ON)
+                    if (now - buzzerStepTimer >= 150) {
+                        setBuzzerHardware(false);
+                        buzzerStepTimer = now;
+                        buzzerStep = 1;
+                    }
+                    break;
+                case 1: // Short pause (OFF)
+                    if (now - buzzerStepTimer >= 100) {
+                        setBuzzerHardware(true);
+                        buzzerStepTimer = now;
+                        buzzerStep = 2;
+                    }
+                    break;
+                case 2: // Second beep (ON)
+                    if (now - buzzerStepTimer >= 150) {
+                        setBuzzerHardware(false);
+                        buzzerStepTimer = now;
+                        buzzerStep = 3;
+                    }
+                    break;
+                case 3: // Long pause (OFF)
+                    if (now - buzzerStepTimer >= 400) {
+                        setBuzzerHardware(true);
+                        buzzerStepTimer = now;
+                        buzzerStep = 0; // Loop back
+                    }
+                    break;
+            }
+            break;
+
+        case BUZZER_CONFIRMATION:
+            // Single short 80ms beep
+            if (now - buzzerStepTimer >= 80) {
+                setBuzzerHardware(false);
+                currentBuzzerMode = BUZZER_IDLE;
+            }
+            break;
+
+        case BUZZER_WIFI_CONNECTED:
+            // Distinct 2-tone chime: 70ms ON -> 50ms OFF -> 140ms ON
+            switch (buzzerStep) {
+                case 0:
+                    if (now - buzzerStepTimer >= 70) {
+                        setBuzzerHardware(false);
+                        buzzerStepTimer = now;
+                        buzzerStep = 1;
+                    }
+                    break;
+                case 1:
+                    if (now - buzzerStepTimer >= 50) {
+                        setBuzzerHardware(true);
+                        buzzerStepTimer = now;
+                        buzzerStep = 2;
+                    }
+                    break;
+                case 2:
+                    if (now - buzzerStepTimer >= 140) {
+                        setBuzzerHardware(false);
+                        currentBuzzerMode = BUZZER_IDLE;
+                    }
+                    break;
+            }
+            break;
+
+        default:
+            stopRinging();
+            break;
+    }
+}
+
+// -------------------------------------------------------------------------
+// Wi-Fi Connection Monitoring
+// -------------------------------------------------------------------------
+void checkWifiStatus() {
+    unsigned long now = millis();
+    if (now - lastWifiCheckTime < 1000) return;
+    lastWifiCheckTime = now;
+
+    wl_status_t status = WiFi.status();
+
+    if (status == WL_CONNECTED) {
+        if (!wifiWasConnected) {
+            wifiWasConnected = true;
+            Serial.println();
+            Serial.println(F("[Wi-Fi] Connected successfully!"));
+            Serial.printf("[Wi-Fi] IP Address : %s\n", WiFi.localIP().toString().c_str());
+            Serial.printf("[Wi-Fi] Signal RSSI: %d dBm\n", WiFi.RSSI());
+            playWifiConnectedBeep();
+        }
+    } else {
+        if (wifiWasConnected) {
+            wifiWasConnected = false;
+            Serial.println(F("[Wi-Fi] Connection lost! ESP32 will auto-reconnect..."));
+        }
+    }
+}
+
+// -------------------------------------------------------------------------
+// HTTP Client Network Calls
+// -------------------------------------------------------------------------
+
+void sendHeartbeat() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    HTTPClient http;
+    String url = String(BACKEND_BASE_URL) + "/api/heartbeat";
+    http.begin(url);
+    http.setTimeout(1500); // 1.5s timeout prevents blocking loop()
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-API-Key", API_KEY);
+
+    // Prepare JSON payload
+    StaticJsonDocument<192> reqDoc;
+    reqDoc["device_id"] = DEVICE_ID;
+    reqDoc["rssi"] = WiFi.RSSI();
+    reqDoc["uptime"] = (unsigned long)(millis() / 1000);
+
+    String requestBody;
+    serializeJson(reqDoc, requestBody);
+
+    int httpCode = http.POST(requestBody);
+
+    if (httpCode == HTTP_CODE_OK || httpCode == 200) {
+        String response = http.getString();
+        StaticJsonDocument<256> respDoc;
+        DeserializationError err = deserializeJson(respDoc, response);
+
+        if (!err) {
+            bool shouldRing = respDoc["ring"] | false;
+            int ringDurationSec = respDoc["ring_seconds"] | 10;
+            bool stopRequested = respDoc["stop"] | false;
+
+            if (stopRequested && currentBuzzerMode == BUZZER_RINGING) {
+                Serial.println(F("[SERVER] Stop command received."));
+                stopRinging();
+            } else if (shouldRing && currentBuzzerMode != BUZZER_RINGING) {
+                Serial.println(F("[SERVER] Ring command received via heartbeat!"));
+                startRinging(ringDurationSec * 1000UL);
+                sendAck(); // Immediately acknowledge receipt
+            }
+        }
+    } else {
+        if (httpCode > 0) {
+            Serial.printf("[Heartbeat] HTTP Error: %d\n", httpCode);
+        } else {
+            Serial.printf("[Heartbeat] Connection failed: %s\n", http.errorToString(httpCode).c_str());
+        }
+    }
+    http.end();
+}
+
+void sendAck() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    HTTPClient http;
+    String url = String(BACKEND_BASE_URL) + "/api/ack";
+    http.begin(url);
+    http.setTimeout(1500);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-API-Key", API_KEY);
+
+    StaticJsonDocument<128> doc;
+    doc["device_id"] = DEVICE_ID;
+
+    String body;
+    serializeJson(doc, body);
+
+    int httpCode = http.POST(body);
+    if (httpCode == 200) {
+        Serial.println(F("[ACK] Ring acknowledged to backend successfully."));
+    }
+    http.end();
+}
+
+void sendClapEvent() {
+    if (WiFi.status() != WL_CONNECTED) return;
+
+    HTTPClient http;
+    String url = String(BACKEND_BASE_URL) + "/api/event";
+    http.begin(url);
+    http.setTimeout(1500);
+    http.addHeader("Content-Type", "application/json");
+    http.addHeader("X-API-Key", API_KEY);
+
+    StaticJsonDocument<192> doc;
+    doc["device_id"] = DEVICE_ID;
+    doc["type"] = "clap_ring";
+    doc["source"] = "clap";
+
+    String body;
+    serializeJson(doc, body);
+
+    int httpCode = http.POST(body);
+    if (httpCode == 200 || httpCode == 201) {
+        Serial.println(F("[EVENT] Double-clap event reported to server."));
+    } else {
+        Serial.printf("[EVENT] Failed to report clap event: HTTP %d\n", httpCode);
+    }
+    http.end();
+}
+
+// -------------------------------------------------------------------------
+// Serial Monitor Test & Calibration Commands
+// -------------------------------------------------------------------------
+void handleSerialCommands() {
+    if (Serial.available() > 0) {
+        char cmd = Serial.read();
+        if (cmd == 't' || cmd == 'T') {
+            testModeActive = !testModeActive;
+            Serial.println();
+            Serial.printf(">>> Sound Test Mode: %s <<<\n", testModeActive ? "ENABLED (Raw logging ON)" : "DISABLED");
+            if (testModeActive) {
+                Serial.println(F("Clap, snap fingers, or speak near the sensor to see pulse timings."));
+                Serial.println(F("Turn the potentiometer until quiet background does NOT trigger pulses."));
+            }
+        } else if (cmd == 'r' || cmd == 'R') {
+            Serial.println(F(">>> Manual Test Ring Triggered via Serial <<<"));
+            startRinging(5000);
+        } else if (cmd == 's' || cmd == 'S') {
+            Serial.println(F(">>> Manual Stop Triggered via Serial <<<"));
+            stopRinging();
+        }
+    }
+}

@@ -1,0 +1,16 @@
+{
+  "permissions": {
+    "allow": [
+      "Exec(ls)",
+      "Exec(Get-ChildItem)",
+      "Exec(mkdir)",
+      "Exec(New-Item)",
+      "Exec(Move-Item)",
+      "Exec(python)",
+      "Exec(pio run)",
+      "Exec(ipconfig)",
+      "Exec(pio device)",
+      "Exec(winget install)"
+    ]
+  }
+}

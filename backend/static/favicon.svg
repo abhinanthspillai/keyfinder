@@ -1,0 +1,37 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="100%" height="100%">
+  <defs>
+    <linearGradient id="bg" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#4F46E5" />
+      <stop offset="100%" stop-color="#1E1B4B" />
+    </linearGradient>
+    <linearGradient id="keyGrad" x1="0%" y1="0%" x2="100%" y2="100%">
+      <stop offset="0%" stop-color="#FDE047" />
+      <stop offset="100%" stop-color="#F59E0B" />
+    </linearGradient>
+    <filter id="glow" x="-20%" y="-20%" width="140%" height="140%">
+      <feDropShadow dx="0" dy="4" stdDeviation="8" flood-color="#F59E0B" flood-opacity="0.4"/>
+    </filter>
+  </defs>
+  <!-- Rounded App Icon Background -->
+  <rect width="512" height="512" rx="128" fill="url(#bg)" />
+  
+  <!-- Outer Radio / Ping Waves -->
+  <path d="M 330 140 A 130 130 0 0 1 330 372" fill="none" stroke="#818CF8" stroke-width="24" stroke-linecap="round" opacity="0.35" />
+  <path d="M 370 100 A 180 180 0 0 1 370 412" fill="none" stroke="#A5B4FC" stroke-width="24" stroke-linecap="round" opacity="0.2" />
+
+  <!-- Stylized Key -->
+  <g filter="url(#glow)">
+    <!-- Key Ring / Head -->
+    <circle cx="210" cy="256" r="82" fill="none" stroke="url(#keyGrad)" stroke-width="38" />
+    <!-- Center Hole -->
+    <circle cx="210" cy="256" r="28" fill="#1E1B4B" />
+    
+    <!-- Key Shaft -->
+    <rect x="270" y="238" width="150" height="36" rx="12" fill="url(#keyGrad)" />
+    
+    <!-- Key Teeth / Bits -->
+    <rect x="350" y="270" width="28" height="42" rx="8" fill="url(#keyGrad)" />
+    <rect x="390" y="270" width="26" height="30" rx="8" fill="url(#keyGrad)" />
+  </g>
+</svg>
+

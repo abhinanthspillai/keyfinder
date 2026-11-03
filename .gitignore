@@ -1,0 +1,29 @@
+# Secrets and local configurations
+firmware/include/config.h
+backend/.env
+
+# SQLite databases
+backend/*.db
+data/*.db
+*.sqlite
+*.sqlite3
+
+# Python cache & virtual environments
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+ENV/
+env/
+
+# PlatformIO / IDE artifacts
+.pio/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
