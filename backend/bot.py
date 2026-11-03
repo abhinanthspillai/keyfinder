@@ -5,6 +5,10 @@ Uses long-polling via httpx with no webhooks or public URLs required.
 
 import asyncio
 import logging
+import wave
+import struct
+import math
+import io
 from datetime import datetime, timezone
 from typing import List, Optional, Set
 import httpx
@@ -17,6 +21,28 @@ from db import (
 )
 
 logger = logging.getLogger("telegram_bot")
+
+def generate_siren_audio(duration: float = 4.0, sample_rate: int = 22050) -> bytes:
+    """Synthesizes an unmistakable, high-intensity emergency alarm siren in WAV format."""
+    num_samples = int(sample_rate * duration)
+    buf = io.BytesIO()
+    with wave.open(buf, 'wb') as wf:
+        wf.setnchannels(1)
+        wf.setsampwidth(2) # 16-bit
+        wf.setframerate(sample_rate)
+        
+        samples = bytearray()
+        for i in range(num_samples):
+            t = i / sample_rate
+            # Fast alternating warble between 1200 Hz and 2400 Hz
+            f = 1800.0 + 600.0 * math.sin(2.0 * math.pi * 6.0 * t)
+            # Add harmonic overtone
+            val1 = 24000.0 * math.sin(2.0 * math.pi * f * t)
+            val2 = 8000.0 * math.sin(2.0 * math.pi * (f * 1.5) * t)
+            sample_val = int(max(-32767, min(32767, val1 + val2)))
+            samples.extend(struct.pack('<h', sample_val))
+        wf.writeframes(samples)
+    return buf.getvalue()
 
 MAIN_KEYBOARD = {
     "keyboard": [
@@ -36,6 +62,7 @@ class TelegramBotService:
         self.is_running = False
         self.task: Optional[asyncio.Task] = None
         self.base_url = f"https://api.telegram.org/bot{self.token}"
+        self.siren_audio_bytes: bytes = generate_siren_audio()
 
     def is_configured(self) -> bool:
         return bool(self.token and not self.token.startswith("your_"))
@@ -87,6 +114,27 @@ class TelegramBotService:
             return resp.status_code == 200
         except Exception as e:
             logger.error(f"[Telegram Bot] Failed to send message to {chat_id}: {e}")
+            return False
+
+    async def send_audio_alert(self, chat_id: int, audio_bytes: bytes, filename: str = "find_phone_alarm.wav", caption: str = "") -> bool:
+        """Sends an urgent alarm audio clip to the chat."""
+        if not self.client or not self.is_running:
+            return False
+        try:
+            url = f"{self.base_url}/sendAudio"
+            files = {"audio": (filename, audio_bytes, "audio/wav")}
+            data = {
+                "chat_id": chat_id,
+                "caption": caption,
+                "parse_mode": "HTML",
+                "title": "🚨 FIND PHONE SIREN ALARM",
+                "performer": "Key Finder Fob",
+                "disable_notification": False
+            }
+            resp = await self.client.post(url, data=data, files=files, timeout=15.0)
+            return resp.status_code == 200
+        except Exception as e:
+            logger.error(f"[Telegram Bot] Failed to send audio alert to {chat_id}: {e}")
             return False
 
     async def _poll_loop(self):
@@ -277,23 +325,33 @@ class TelegramBotService:
         await self.send_message(chat_id, "⏹️ <b>Ring stopped.</b> Buzzer cancelled.", reply_markup=MAIN_KEYBOARD)
 
     async def send_find_phone_message(self):
-        """Sends a high-priority message to all allowed chat IDs when button is pressed on device."""
+        """Sends an urgent notification and loud alarm siren to all allowed chat IDs."""
         if not self.client or not self.is_running:
             logger.warning("[Telegram Bot] Cannot send find phone message: bot not running")
             return
 
         message = (
-            "🚨 <b>FIND PHONE ALERT!</b> 📱\n\n"
+            "🚨🚨 <b>FIND PHONE ALERT!</b> 📱🔊\n\n"
             "The physical button on your <b>Key Finder</b> was pressed!\n"
-            "<i>Your phone is receiving this alert from your keys.</i>"
+            "<i>Your keys are looking for this phone!</i>"
         )
 
         for chat_id in self.allowed_chat_ids:
             try:
+                # 1. Send the prominent alert message
                 try:
-                    await self.send_message(chat_id, message, "HTML", MAIN_KEYBOARD)
+                    await self.send_message(chat_id, message, reply_markup=MAIN_KEYBOARD)
                 except TypeError:
                     await self.send_message(chat_id, message)
-                logger.info(f"[Telegram Bot] Find phone message sent to chat {chat_id}")
+
+                # 2. Send the loud siren audio alarm
+                if self.siren_audio_bytes:
+                    await self.send_audio_alert(
+                        chat_id,
+                        self.siren_audio_bytes,
+                        filename="Find_Phone_Siren.wav",
+                        caption="🔊 <b>SIREN ALARM:</b> Play out loud to pinpoint phone location!"
+                    )
+                logger.info(f"[Telegram Bot] Find phone message + siren alert sent to chat {chat_id}")
             except Exception as e:
                 logger.error(f"[Telegram Bot] Failed to send find phone message to {chat_id}: {e}")
