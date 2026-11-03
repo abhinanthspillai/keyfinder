@@ -66,6 +66,7 @@ void updateSoundSensor();
 void updateButton();
 void setBuzzerHardware(bool on);
 void buzzerTask(void *pvParameters);
+void networkTask(void *pvParameters);
 void sendHeartbeat();
 void sendClapEvent();
 void sendFindPhoneEvent();
@@ -73,6 +74,7 @@ void sendAck();
 void handleSerialCommands();
 
 static TaskHandle_t buzzerTaskHandle = NULL;
+static TaskHandle_t networkTaskHandle = NULL;
 
 // -------------------------------------------------------------------------
 // Arduino Setup & Main Loop
@@ -168,43 +170,32 @@ void setup() {
         &buzzerTaskHandle,
         0 // Pin to Core 0
     );
+
+    // Launch dedicated Network Task on Core 1 with priority 1
+    // Handles all HTTPS calls to Render asynchronously so loop() never blocks!
+    xTaskCreatePinnedToCore(
+        networkTask,
+        "NetworkTask",
+        8192,
+        NULL,
+        1,
+        &networkTaskHandle,
+        1 // Pin to Core 1
+    );
 }
 
 void loop() {
-    unsigned long now = millis();
-
-    // 1. Process clap detection
+    // 1. Process clap detection with microsecond responsiveness (no network blocking!)
     updateSoundSensor();
 
-    // 2. Process button
+    // 2. Process button with instant hardware response (no network blocking!)
     updateButton();
 
-    // 3. Buzzer is driven with hardware precision by buzzerTask on Core 0
-
-    // 4. Send clap event to backend
-    if (pendingClapEvent && WiFi.status() == WL_CONNECTED) {
-        pendingClapEvent = false;
-        sendClapEvent();
-    }
-
-    // 5. Send find phone event
-    if (pendingFindPhoneEvent && WiFi.status() == WL_CONNECTED) {
-        pendingFindPhoneEvent = false;
-        sendFindPhoneEvent();
-    }
-
-    // 6. Monitor Wi-Fi state
-    checkWifiStatus();
-
-    // 7. Send periodic heartbeat (throttle during ringing to reduce Wi-Fi congestion)
-    unsigned long hbInterval = ringPattern.isPlaying() ? 1500 : HEARTBEAT_INTERVAL_MS;
-    if (WiFi.status() == WL_CONNECTED && (now - lastHeartbeatTime >= hbInterval)) {
-        lastHeartbeatTime = now;
-        sendHeartbeat();
-    }
-
-    // 8. Handle serial commands
+    // 3. Handle serial commands
     handleSerialCommands();
+
+    // Small 1ms delay to allow FreeRTOS context switching
+    vTaskDelay(pdMS_TO_TICKS(1));
 }
 
 // -------------------------------------------------------------------------
@@ -222,14 +213,16 @@ void initHardware() {
 // -------------------------------------------------------------------------
 void updateSoundSensor() {
 #if !ENABLE_CLAP_DETECTION
-    return; // Clap detection disabled in favor of Mobile Shortcuts & Telegram
+    return; // Clap detection disabled in config.h
 #else
     unsigned long now = millis();
     bool currentSoundState = (digitalRead(PIN_SOUND_DO) == SOUND_ACTIVE_LEVEL);
 
-    // Check for state change
+    // Diagnostic logging on sound pulse start
     if (currentSoundState != lastSoundState) {
-        soundStateChangeTime = now;
+        if (currentSoundState) {
+            Serial.println(F("[SOUND] >>> Pulse detected on GPIO33! <<<"));
+        }
         lastSoundState = currentSoundState;
     }
 
@@ -241,40 +234,57 @@ void updateSoundSensor() {
         Serial.println(F(">>> DOUBLE CLAP DETECTED! TRIGGERING RING <<<"));
         ringPattern.start();
         pendingClapEvent = true;
+        if (networkTaskHandle != NULL) {
+            xTaskNotifyGive(networkTaskHandle);
+        }
     }
 #endif
 }
 
 // -------------------------------------------------------------------------
-// Button Processing
+// Button Processing (Instant Physical Response for Reverse Find Phone)
 // -------------------------------------------------------------------------
 void updateButton() {
-    unsigned long now = millis();
-    bool buttonPressed = (digitalRead(PIN_BUTTON) == LOW); // INPUT_PULLUP
+    static bool lastBtnPhysical = HIGH;
+    static unsigned long btnPressTime = 0;
+    static bool btnHandled = false;
 
-    ButtonHandler::Action action = buttonHandler.process(now, buttonPressed);
+    bool currentBtn = digitalRead(PIN_BUTTON); // LOW when pressed (INPUT_PULLUP)
 
-    if (action == ButtonHandler::SHORT_PRESS) {
-        Serial.println(F("[BUTTON] Short press detected"));
+    // Detect press transition (HIGH -> LOW)
+    if (lastBtnPhysical == HIGH && currentBtn == LOW) {
+        btnPressTime = millis();
+        btnHandled = false;
+    }
+
+    // Debounce check: button held LOW for >= 30ms
+    if (currentBtn == LOW && !btnHandled && (millis() - btnPressTime >= 30)) {
+        btnHandled = true;
+        Serial.println(F("[BUTTON] BOOT button pressed! (GPIO 0)"));
+
         if (ringPattern.isPlaying()) {
-            Serial.println(F("[BUTTON] Stopping ring"));
+            Serial.println(F("[BUTTON] Stopping active ring."));
             ringPattern.stop();
             setBuzzerHardware(false);
         } else {
-            Serial.println(F("[BUTTON] Triggering Find Phone!"));
-            // Play confirmation chirp
+            Serial.println(F("[BUTTON] Triggering Reverse Find Phone!"));
+            // Instant acoustic confirmation chirp (80ms) directly from ESP32
             setBuzzerHardware(true);
             delay(80);
             setBuzzerHardware(false);
+
             pendingFindPhoneEvent = true;
+            if (networkTaskHandle != NULL) {
+                xTaskNotifyGive(networkTaskHandle);
+            }
         }
-    } else if (action == ButtonHandler::LONG_PRESS) {
-        Serial.println(F("[BUTTON] Long press detected - sending find phone"));
-        setBuzzerHardware(true);
-        delay(120);
-        setBuzzerHardware(false);
-        pendingFindPhoneEvent = true;
     }
+
+    if (currentBtn == HIGH) {
+        btnHandled = false;
+    }
+
+    lastBtnPhysical = currentBtn;
 }
 
 // -------------------------------------------------------------------------
@@ -297,6 +307,43 @@ void buzzerTask(void *pvParameters) {
             setBuzzerHardware(false);
             vTaskDelay(pdMS_TO_TICKS(20));
         }
+    }
+}
+
+// -------------------------------------------------------------------------
+// Dedicated FreeRTOS Background Network Task running on Core 1
+// Handles all HTTPS calls to Render asynchronously so loop() never blocks!
+// -------------------------------------------------------------------------
+void networkTask(void *pvParameters) {
+    for (;;) {
+        if (WiFi.status() == WL_CONNECTED) {
+            // 1. Send Find Phone event immediately if triggered
+            if (pendingFindPhoneEvent) {
+                pendingFindPhoneEvent = false;
+                Serial.println(F("[NET] Dispatching Reverse Find Phone alert to cloud..."));
+                sendFindPhoneEvent();
+            }
+
+            // 2. Send Clap event immediately if detected
+            if (pendingClapEvent) {
+                pendingClapEvent = false;
+                Serial.println(F("[NET] Dispatching Double Clap event to cloud..."));
+                sendClapEvent();
+            }
+
+            // 3. Periodic heartbeat to Render
+            unsigned long now = millis();
+            unsigned long hbInterval = ringPattern.isPlaying() ? 3000 : HEARTBEAT_INTERVAL_MS;
+            if (now - lastHeartbeatTime >= hbInterval) {
+                lastHeartbeatTime = now;
+                sendHeartbeat();
+            }
+        } else {
+            checkWifiStatus();
+        }
+
+        // Wait up to 50ms, or wake up immediately if a button or clap notification arrives
+        ulTaskNotifyTake(pdTRUE, pdMS_TO_TICKS(50));
     }
 }
 
